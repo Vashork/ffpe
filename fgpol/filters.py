@@ -7,6 +7,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+LIST_FIELDS = {"srcintf", "dstintf", "srcaddr", "dstaddr", "service"}
+
+
 def as_name_list(value: Any) -> List[str]:
     """
     Convert FortiOS list/object values to list of names (strings).
@@ -58,15 +61,15 @@ def parse_csv_list(value: Optional[str]) -> List[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
-def match_filter_str(needle: str | None, hay_value: Any) -> bool:
+def match_filter_str(needle: Optional[str], hay_value: Any) -> bool:
     """
-    Match a string filter against scalar or list-like FortiOS fields.
+    Exact/contains match for a single value.
 
     - For list-like fields: True if needle is contained in the list.
     - For scalar fields: True if equals.
 
     Args:
-        needle (str | None): Filter value. If None, match is always True.
+        needle (Optional[str]): Filter value. If None, match is always True.
         hay_value (Any): Policy field value.
 
     Returns:
@@ -82,12 +85,36 @@ def match_filter_str(needle: str | None, hay_value: Any) -> bool:
     return str(hay_value) == needle
 
 
+def match_in(allowed: List[str], hay_value: Any) -> bool:
+    """
+    Inclusion filter (IN).
+
+    For list-like fields: True if ANY element is in allowed.
+    For scalar fields: True if scalar equals any allowed value.
+
+    Args:
+        allowed (List[str]): Allowed values list.
+        hay_value (Any): Policy field value.
+
+    Returns:
+        bool: True if policy passes inclusion, else False.
+    """
+    if not allowed:
+        return True
+
+    hay_list = as_name_list(hay_value)
+    if hay_list:
+        return any(item in allowed for item in hay_list)
+
+    return str(hay_value) in allowed
+
+
 def match_not_in(excluded: List[str], hay_value: Any) -> bool:
     """
-    Exclusion filter (NOT IN) for scalar or list-like fields.
+    Exclusion filter (NOT IN).
 
-    For list-like fields: returns False if ANY element is in excluded.
-    For scalar fields: returns False if scalar equals any excluded value.
+    For list-like fields: False if ANY element is in excluded.
+    For scalar fields: False if scalar equals any excluded value.
 
     Args:
         excluded (List[str]): Excluded values list.
@@ -106,16 +133,30 @@ def match_not_in(excluded: List[str], hay_value: Any) -> bool:
     return str(hay_value) not in excluded
 
 
+def _get_field_value(policy: Dict[str, Any], field: str) -> Any:
+    """
+    Get field value from policy with proper defaults.
+    """
+    if field in LIST_FIELDS:
+        return policy.get(field, [])
+    return policy.get(field, "")
+
+
 def apply_filters(policies: List[Dict[str, Any]], flt: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Apply client-side filters to firewall policies.
 
-    Supported filter keys (existing):
-        srcintf, dstintf, action, status, name, policyid, srcaddr, dstaddr, service
+    Supported:
+      - exact:   <field> (e.g. srcintf, status, action, name, srcaddr...)
+      - IN:      <field>_in       (comma-separated)
+      - NOT IN:  <field>_not_in   (comma-separated)
 
-    Supported NOT_IN keys (new):
-        dstintf_not_in, status_not_in
-        (can be extended easily for other fields)
+    Fields typically used:
+      srcintf, dstintf, action, status, name, policyid, srcaddr, dstaddr, service
+
+    Notes:
+      - policyid is handled separately (exact match)
+      - IN/NOT IN for list-like fields checks membership against each element.
 
     Args:
         policies (List[Dict[str, Any]]): Policies from FortiOS.
@@ -124,43 +165,36 @@ def apply_filters(policies: List[Dict[str, Any]], flt: Dict[str, Any]) -> List[D
     Returns:
         List[Dict[str, Any]]: Filtered policies.
     """
-    dstintf_excl = parse_csv_list(flt.get("dstintf_not_in"))
-    status_excl = parse_csv_list(flt.get("status_not_in"))
+    # Pre-parse IN/NOT IN lists once
+    list_keys = [
+        "srcintf", "dstintf", "action", "status", "name", "srcaddr", "dstaddr", "service"
+    ]
+    allowed_map = {k: parse_csv_list(flt.get(f"{k}_in")) for k in list_keys}
+    excluded_map = {k: parse_csv_list(flt.get(f"{k}_not_in")) for k in list_keys}
 
     out: List[Dict[str, Any]] = []
     for policy in policies:
-        # Positive filters
-        if not match_filter_str(flt.get("srcintf"), policy.get("srcintf", [])):
-            continue
-        if not match_filter_str(flt.get("dstintf"), policy.get("dstintf", [])):
-            continue
-        if not match_filter_str(flt.get("action"), policy.get("action", "")):
-            continue
-        if not match_filter_str(flt.get("status"), policy.get("status", "")):
-            continue
-        if not match_filter_str(flt.get("name"), policy.get("name", "")):
-            continue
+        # --- Exact/single-value filters (as before) ---
+        for key in list_keys:
+            if not match_filter_str(flt.get(key), _get_field_value(policy, key)):
+                break
+        else:
+            # --- IN filters ---
+            for key in list_keys:
+                if not match_in(allowed_map[key], _get_field_value(policy, key)):
+                    break
+            else:
+                # --- NOT IN filters ---
+                for key in list_keys:
+                    if not match_not_in(excluded_map[key], _get_field_value(policy, key)):
+                        break
+                else:
+                    # --- policyid exact match ---
+                    policy_id = policy.get("policyid", policy.get("id", ""))
+                    want_id = flt.get("policyid")
+                    if want_id is not None and str(policy_id) != str(want_id):
+                        continue
 
-        # NOT IN filters (exclusions)
-        if not match_not_in(dstintf_excl, policy.get("dstintf", [])):
-            continue
-        if not match_not_in(status_excl, policy.get("status", "")):
-            continue
-
-        # ID filter
-        policy_id = policy.get("policyid", policy.get("id", ""))
-        want_id = flt.get("policyid")
-        if want_id is not None and str(policy_id) != str(want_id):
-            continue
-
-        # Address/service filters
-        if not match_filter_str(flt.get("srcaddr"), policy.get("srcaddr", [])):
-            continue
-        if not match_filter_str(flt.get("dstaddr"), policy.get("dstaddr", [])):
-            continue
-        if not match_filter_str(flt.get("service"), policy.get("service", [])):
-            continue
-
-        out.append(policy)
+                    out.append(policy)
 
     return out

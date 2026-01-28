@@ -119,6 +119,24 @@ def load_config(dotenv_path: str) -> AppConfig:
         "service": to_str(data.get("FILTER_SERVICE")),
         "dstintf_not_in": to_str(data.get("FILTER_DSTINTF_NOT_IN")),
         "status_not_in": to_str(data.get("FILTER_STATUS_NOT_IN")),
+        # IN lists
+        "srcintf_in": to_str(data.get("FILTER_SRCINTF_IN")),
+        "dstintf_in": to_str(data.get("FILTER_DSTINTF_IN")),
+        "action_in": to_str(data.get("FILTER_ACTION_IN")),
+        "status_in": to_str(data.get("FILTER_STATUS_IN")),
+        "name_in": to_str(data.get("FILTER_NAME_IN")),
+        "srcaddr_in": to_str(data.get("FILTER_SRCADDR_IN")),
+        "dstaddr_in": to_str(data.get("FILTER_DSTADDR_IN")),
+        "service_in": to_str(data.get("FILTER_SERVICE_IN")),
+        # NOT IN lists
+        "srcintf_not_in": to_str(data.get("FILTER_SRCINTF_NOT_IN")),
+        "dstintf_not_in": to_str(data.get("FILTER_DSTINTF_NOT_IN")),
+        "action_not_in": to_str(data.get("FILTER_ACTION_NOT_IN")),
+        "status_not_in": to_str(data.get("FILTER_STATUS_NOT_IN")),
+        "name_not_in": to_str(data.get("FILTER_NAME_NOT_IN")),
+        "srcaddr_not_in": to_str(data.get("FILTER_SRCADDR_NOT_IN")),
+        "dstaddr_not_in": to_str(data.get("FILTER_DSTADDR_NOT_IN")),
+        "service_not_in": to_str(data.get("FILTER_SERVICE_NOT_IN")),
     }
 
     show_flags = {
