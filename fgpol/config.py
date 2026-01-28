@@ -117,6 +117,8 @@ def load_config(dotenv_path: str) -> AppConfig:
         "srcaddr": to_str(data.get("FILTER_SRCADDR")),
         "dstaddr": to_str(data.get("FILTER_DSTADDR")),
         "service": to_str(data.get("FILTER_SERVICE")),
+        "dstintf_not_in": to_str(data.get("FILTER_DSTINTF_NOT_IN")),
+        "status_not_in": to_str(data.get("FILTER_STATUS_NOT_IN")),
     }
 
     show_flags = {
