@@ -41,7 +41,6 @@ venv.bak/
 
 # Виртуальное окружение в корне проекта (Windows, если создано через `python -m venv .`)
 Lib/
-Scripts/
 
 # pyenv
 .python-version
