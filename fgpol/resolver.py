@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 DNS/IP resolver with optional fallback via fw_objects.csv.
 
@@ -25,13 +26,20 @@ class ResolveResult:
 
 class FwObjectsLookup:
     """
-    Loads fw_objects.csv/tsv with columns:
+    Loads fw_objects.csv/tsv.
+
+    Supported schemas:
+
+    1) RU (legacy) columns:
         "Имя объекта", "ip", "mask"
+
+    2) EN (new) columns:
+        "name", "cidr"  (e.g. name=zvpm, cidr=10.10.10.10/32)
 
     Supports:
     - find_name_for_ip(ip) -> object name by IP-in-network (most specific wins)
     - find_ref_for_name(name) -> reference string by exact object name (case-insensitive)
-      host -> "10.1.1.4"
+      host -> "10.1.1.4" or "10.1.1.4/32" depending on file content
       net  -> "10.20.99.0/24"
     """
 
@@ -64,56 +72,89 @@ class FwObjectsLookup:
                 dialect.delimiter = "\t"
 
             reader = csv.DictReader(f, dialect=dialect)
-            required = {"Имя объекта", "ip", "mask"}
-            if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+            if not reader.fieldnames:
+                raise ValueError("fw_objects must contain a header row.")
+
+            fields = set(reader.fieldnames)
+
+            # Detect schema
+            ru_required = {"Имя объекта", "ip", "mask"}
+            en_required = {"name", "cidr"}
+
+            is_ru = ru_required.issubset(fields)
+            is_en = en_required.issubset(fields)
+
+            if not (is_ru or is_en):
                 raise ValueError(
-                    "fw_objects must contain columns: "
-                    + ", ".join(sorted(required))
-                    + f". Found: {reader.fieldnames}"
+                    "fw_objects must contain either RU columns: "
+                    + ", ".join(sorted(ru_required))
+                    + " OR EN columns: name,cidr. "
+                    + f"Found: {reader.fieldnames}"
                 )
 
             networks: List[Tuple[ipaddress._BaseNetwork, str]] = []
             name_to_ref: Dict[str, str] = {}
 
             for row in reader:
-                name_raw = (row.get("Имя объекта") or "").strip()
-                ip_str = (row.get("ip") or "").strip()
-                mask_str = (row.get("mask") or "").strip()
+                if is_ru:
+                    # --- RU legacy format (unchanged logic) ---
+                    name_raw = (row.get("Имя объекта") or "").strip()
+                    ip_str = (row.get("ip") or "").strip()
+                    mask_str = (row.get("mask") or "").strip()
 
-                if not name_raw or not ip_str:
-                    continue
-
-                try:
-                    ip_obj = ipaddress.ip_address(ip_str)
-                except ValueError:
-                    continue
-
-                if not mask_str:
-                    prefix = 32 if isinstance(ip_obj, ipaddress.IPv4Address) else 128
-                else:
-                    try:
-                        prefix = self._mask_to_prefix(mask_str)
-                    except Exception:
+                    if not name_raw or not ip_str:
                         continue
 
-                try:
-                    network = ipaddress.ip_network(f"{ip_str}/{prefix}", strict=False)
-                except ValueError:
-                    continue
+                    try:
+                        ip_obj = ipaddress.ip_address(ip_str)
+                    except ValueError:
+                        continue
 
-                name_norm = self._normalize_name(name_raw)
+                    if not mask_str:
+                        prefix = 32 if isinstance(ip_obj, ipaddress.IPv4Address) else 128
+                    else:
+                        try:
+                            prefix = self._mask_to_prefix(mask_str)
+                        except Exception:
+                            continue
 
-                if (network.version == 4 and network.prefixlen == 32) or (
-                        network.version == 6 and network.prefixlen == 128
-                ):
-                    name_to_ref[name_norm] = ip_str
+                    try:
+                        network = ipaddress.ip_network(f"{ip_str}/{prefix}", strict=False)
+                    except ValueError:
+                        continue
+
+                    name_norm = self._normalize_name(name_raw)
+
+                    if (network.version == 4 and network.prefixlen == 32) or (
+                            network.version == 6 and network.prefixlen == 128
+                    ):
+                        name_to_ref[name_norm] = ip_str
+                    else:
+                        name_to_ref.setdefault(
+                            name_norm,
+                            f"{network.network_address}/{network.prefixlen}",
+                        )
+
+                    networks.append((network, name_raw))
+
                 else:
-                    name_to_ref.setdefault(
-                        name_norm,
-                        f"{network.network_address}/{network.prefixlen}",
-                    )
+                    # --- EN new format: name from "name", network/ref from "cidr" ---
+                    name_raw = (row.get("name") or "").strip()
+                    cidr_str = (row.get("cidr") or "").strip()
 
-                networks.append((network, name_raw))
+                    if not name_raw or not cidr_str:
+                        continue
+
+                    try:
+                        network = ipaddress.ip_network(cidr_str, strict=False)
+                    except ValueError:
+                        continue
+
+                    # IP -> name fallback
+                    networks.append((network, name_raw))
+
+                    # name -> ref fallback
+                    name_to_ref[self._normalize_name(name_raw)] = cidr_str
 
             networks.sort(key=lambda x: x[0].prefixlen, reverse=True)
             self._networks = networks
