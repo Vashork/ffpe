@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 
+# -----------------------------
+# .env parsing helpers
+# -----------------------------
 def parse_dotenv(path: str) -> Dict[str, str]:
     data: Dict[str, str] = {}
     with open(path, "r", encoding="utf-8") as f:
@@ -51,6 +54,12 @@ def to_int(value: Optional[str], default: int) -> int:
     return int(value)
 
 
+def to_float(value: Optional[str], default: float) -> float:
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
 def to_str(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -58,23 +67,41 @@ def to_str(value: Optional[str]) -> Optional[str]:
     return v if v else None
 
 
+# -----------------------------
+# App config model
+# -----------------------------
 @dataclass(frozen=True)
 class AppConfig:
+    # Connection
     token: str
     base_url: str
     vdom: Optional[str]
     verify_tls: bool
     timeout_seconds: int
     server_filter: Optional[str]
+
+    # Output
     output_dir: str
     output_max_col_width: int
+
+    # Filters / flags
     filters: Dict[str, Any]
     show_flags: Dict[str, bool]
+
+    # Export
     export_csv: bool
     csv_filename: str | None
     print_console: bool
 
-    # DEBUG
+    # --- CSV resolve (post-processing) ---
+    resolve_enabled: bool
+    resolve_input_csv: str | None
+    resolve_columns: str | None
+    resolve_output_suffix: str | None
+    resolve_dns_timeout: float
+    resolve_fw_objects_path: str | None
+
+    # Debug
     debug: bool
     debug_response_keys: bool
     debug_results_type: bool
@@ -88,6 +115,9 @@ class AppConfig:
         return params
 
 
+# -----------------------------
+# Loader
+# -----------------------------
 def load_config(dotenv_path: str) -> AppConfig:
     data = parse_dotenv(dotenv_path)
 
@@ -107,7 +137,21 @@ def load_config(dotenv_path: str) -> AppConfig:
     except ValueError as exc:
         raise RuntimeError(f"Invalid integer value in .env: {exc}") from exc
 
+    # --- Resolve options ---
+    try:
+        resolve_dns_timeout = to_float(data.get("RESOLVE_DNS_TIMEOUT"), 3.0)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid float value in .env: {exc}") from exc
+
+    resolve_enabled = to_bool(data.get("RESOLVE_ENABLED"), False)
+    resolve_input_csv = to_str(data.get("RESOLVE_INPUT_CSV"))
+    resolve_columns = to_str(data.get("RESOLVE_COLUMNS"))
+    resolve_output_suffix = to_str(data.get("RESOLVE_OUTPUT_SUFFIX"))
+    resolve_fw_objects_path = to_str(data.get("RESOLVE_FW_OBJECTS_PATH"))
+
+    # --- Client-side filters ---
     filters = {
+        # EXACT
         "srcintf": to_str(data.get("FILTER_SRCINTF")),
         "dstintf": to_str(data.get("FILTER_DSTINTF")),
         "action": to_str(data.get("FILTER_ACTION")),
@@ -117,8 +161,7 @@ def load_config(dotenv_path: str) -> AppConfig:
         "srcaddr": to_str(data.get("FILTER_SRCADDR")),
         "dstaddr": to_str(data.get("FILTER_DSTADDR")),
         "service": to_str(data.get("FILTER_SERVICE")),
-        "dstintf_not_in": to_str(data.get("FILTER_DSTINTF_NOT_IN")),
-        "status_not_in": to_str(data.get("FILTER_STATUS_NOT_IN")),
+
         # IN lists
         "srcintf_in": to_str(data.get("FILTER_SRCINTF_IN")),
         "dstintf_in": to_str(data.get("FILTER_DSTINTF_IN")),
@@ -128,6 +171,7 @@ def load_config(dotenv_path: str) -> AppConfig:
         "srcaddr_in": to_str(data.get("FILTER_SRCADDR_IN")),
         "dstaddr_in": to_str(data.get("FILTER_DSTADDR_IN")),
         "service_in": to_str(data.get("FILTER_SERVICE_IN")),
+
         # NOT IN lists
         "srcintf_not_in": to_str(data.get("FILTER_SRCINTF_NOT_IN")),
         "dstintf_not_in": to_str(data.get("FILTER_DSTINTF_NOT_IN")),
@@ -139,6 +183,7 @@ def load_config(dotenv_path: str) -> AppConfig:
         "service_not_in": to_str(data.get("FILTER_SERVICE_NOT_IN")),
     }
 
+    # --- Output columns ---
     show_flags = {
         "policyid": to_bool(data.get("SHOW_POLICYID"), True),
         "name": to_bool(data.get("SHOW_NAME"), True),
@@ -160,14 +205,25 @@ def load_config(dotenv_path: str) -> AppConfig:
         verify_tls=verify_tls,
         timeout_seconds=timeout_seconds,
         server_filter=to_str(data.get("FGT_SERVER_FILTER")),
+
         output_dir=to_str(data.get("OUTPUT_DIR")) or "./output",
         output_max_col_width=output_max_col_width,
+
         filters=filters,
         show_flags=show_flags,
-        debug=to_bool(data.get("DEBUG"), False),
-        debug_response_keys=to_bool(data.get("DEBUG_RESPONSE_KEYS"), True),
-        debug_results_type=to_bool(data.get("DEBUG_RESULTS_TYPE"), True),
+
         export_csv=to_bool(data.get("EXPORT_CSV"), True),
         csv_filename=to_str(data.get("CSV_FILENAME")),
         print_console=to_bool(data.get("PRINT_CONSOLE"), False),
+
+        resolve_enabled=resolve_enabled,
+        resolve_input_csv=resolve_input_csv,
+        resolve_columns=resolve_columns,
+        resolve_output_suffix=resolve_output_suffix,
+        resolve_dns_timeout=resolve_dns_timeout,
+        resolve_fw_objects_path=resolve_fw_objects_path,
+
+        debug=to_bool(data.get("DEBUG"), False),
+        debug_response_keys=to_bool(data.get("DEBUG_RESPONSE_KEYS"), True),
+        debug_results_type=to_bool(data.get("DEBUG_RESULTS_TYPE"), True),
     )
