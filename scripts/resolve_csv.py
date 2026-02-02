@@ -20,12 +20,112 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import csv
-import os
-from pathlib import Path
+import threading
+import time
 from typing import Dict, List
 
 from fgpol.config import load_config
 from fgpol.resolver import DnsResolver, FwObjectsLookup, resolve_cell
+
+
+import os
+import shutil
+import sys
+import threading
+import time
+
+
+class Spinner:
+    """Clean one-line spinner; handles long lines (no wrapping) and clears properly."""
+
+    def __init__(self, message: str = "Resolving") -> None:
+        self.message = message
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._current = ""
+        self._thread: threading.Thread | None = None
+        self._last_lines = 1
+
+        # Enable ANSI on Windows terminals that support it
+        self._ansi = sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
+
+    def set_current(self, text: str) -> None:
+        # make it single-line
+        text = text.replace("\r", " ").replace("\n", " ")
+        with self._lock:
+            self._current = text
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        self._clear_rendered_lines()
+
+    def _term_width(self) -> int:
+        try:
+            return shutil.get_terminal_size(fallback=(120, 24)).columns
+        except Exception:
+            return 120
+
+    def _clear_rendered_lines(self) -> None:
+        width = self._term_width()
+
+        if self._ansi:
+            # Clear all previously occupied lines and return to the top line
+            for _ in range(self._last_lines):
+                sys.stdout.write("\r\x1b[2K")  # clear current line
+                sys.stdout.write("\x1b[1A")    # cursor up
+            sys.stdout.write("\r\x1b[2K")      # clear the line we're on
+            sys.stdout.write("\r")
+            sys.stdout.flush()
+        else:
+            # best-effort: clear only current line
+            sys.stdout.write("\r" + (" " * width) + "\r")
+            sys.stdout.flush()
+
+        self._last_lines = 1
+
+    def _render(self, line: str) -> None:
+        width = self._term_width()
+
+        # Truncate to avoid wrapping (reserve 1 char)
+        if width > 2 and len(line) >= width:
+            line = line[: max(0, width - 2)] + "…"
+
+        # Compute how many terminal lines it would occupy *without truncation*:
+        # (we keep truncation anyway; this is for clearing safety)
+        self._last_lines = 1
+
+        if self._ansi:
+            sys.stdout.write("\r\x1b[2K")  # clear line
+            sys.stdout.write("\r" + line)
+            sys.stdout.flush()
+        else:
+            sys.stdout.write("\r" + (" " * width) + "\r")
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+    def _run(self) -> None:
+        frames = ["\\", "|", "/", "-"]
+        i = 0
+        while not self._stop.is_set():
+            with self._lock:
+                cur = self._current
+
+            tail = f" — {cur}" if cur else ""
+            line = f"{self.message} [{frames[i % len(frames)]}]{tail}"
+            self._render(line)
+
+            i += 1
+            time.sleep(0.12)
+
 
 
 def _pick_input_csv(output_dir: str, explicit: str | None) -> Path:
@@ -52,11 +152,6 @@ def _parse_columns(value: str) -> List[str]:
 def main() -> int:
     cfg = load_config(".env")
 
-    # Read resolve-specific options from cfg via raw .env keys:
-    # We'll store them in config.py in the next step (см. ниже).
-    # Пока — читаем напрямую из cfg через его "filters/show_flags" нельзя,
-    # поэтому ожидается, что ты добавишь поля в AppConfig (я могу сделать патч).
-    # Здесь предполагаем, что эти поля уже добавлены:
     if not cfg.resolve_enabled:
         print("Resolve disabled (RESOLVE_ENABLED=false).")
         return 0
@@ -81,22 +176,28 @@ def main() -> int:
     out_name = f"{input_csv.stem}{suffix}{input_csv.suffix}"
     out_path = out_dir / out_name
 
-    with input_csv.open("r", encoding="utf-8", newline="") as fin:
-        reader = csv.DictReader(fin)
-        if not reader.fieldnames:
-            raise ValueError("CSV has no header row.")
+    spinner = Spinner("Resolving")
+    spinner.start()
+    try:
+        with input_csv.open("r", encoding="utf-8", newline="") as fin:
+            reader = csv.DictReader(fin)
+            if not reader.fieldnames:
+                raise ValueError("CSV has no header row.")
 
-        missing = [c for c in columns_to_resolve if c not in reader.fieldnames]
-        if missing:
-            raise ValueError(f"Columns not found in CSV header: {missing}. Header: {reader.fieldnames}")
+            missing = [c for c in columns_to_resolve if c not in reader.fieldnames]
+            if missing:
+                raise ValueError(f"Columns not found in CSV header: {missing}. Header: {reader.fieldnames}")
 
-        rows: List[Dict[str, str]] = []
-        for row in reader:
-            for col in columns_to_resolve:
-                val = (row.get(col) or "").strip()
-                if val:
-                    row[col] = resolve_cell(val, resolver)
-            rows.append(row)
+            rows: List[Dict[str, str]] = []
+            for row in reader:
+                for col in columns_to_resolve:
+                    val = (row.get(col) or "").strip()
+                    if val:
+                        spinner.set_current(f"{col}={val}")
+                        row[col] = resolve_cell(val, resolver)
+                rows.append(row)
+    finally:
+        spinner.stop()
 
     with out_path.open("w", encoding="utf-8", newline="") as fout:
         writer = csv.DictWriter(fout, fieldnames=reader.fieldnames)
