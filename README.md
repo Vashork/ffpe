@@ -300,6 +300,25 @@ Final result:
 
     firewall_policies_ports.csv
 
+## Typical Workflow with git
+
+# 1. Start from your feature/development branch
+```git checkout dev```
+
+# 2. Sync with main branch BEFORE starting new work
+#    (This prevents large conflict batches later!)
+```git pull origin master```
+
+# 3. Stage and commit your work
+git add .
+git commit -m "feat: brief description of changes"
+
+# 4. Before pushing — sync again to catch recent changes
+git pull origin master --rebase  # or regular merge if preferred
+
+# 5. Push your branch
+git push -u origin feature/dev
+
 ------------------------------------------------------------------------
 
 ## Version
