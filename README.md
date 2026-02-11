@@ -48,7 +48,25 @@ source .venv/bin/activate        # Linux/macOS
 ``` bash
 pip install -r requirements.txt
 ```
+### 4. Export inventory data (addresses and services)
+Before using name and port resolution, export required CMDB objects from FortiGate:
+```bash
+ python scripts/export_addresses.py 
+```
+```bash
+ python scripts/export_services.py
+```
+After execution, copy or verify that the generated files are located in:
+```
+    inventory/ 
+    ├── firewall_addresses.csv 
+    ├── firewall_services_custom.csv 
+    └── firewall_service_groups_with_ports.csv
+```
 
+These files are required for:
+- DNS fallback resolution (resolve_name.py)
+- DNS fallback resolution (resolve_name.py)
 ------------------------------------------------------------------------
 
 ## Configuration
@@ -286,4 +304,4 @@ Final result:
 
 ## Version
 
-Current: 1.5.2
+Current: 1.6
