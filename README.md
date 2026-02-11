@@ -1,41 +1,49 @@
-# FG-api (FortiGate Firewall Policy Exporter)
+# ffpe (FortiGate Firewall Policy Exporter)
 
-## Назначение
+## Overview
 
--   Получение firewall policies с FortiGate через FortiOS REST API
--   Фильтрация policies по заданным критериям
--   Экспорт результата в CSV
--   Управление поведением исключительно через `.env`
+`ffpe` is a CLI tool for exporting, filtering, and post-processing
+FortiGate firewall policies via the FortiOS REST API.
+
+It supports:
+
+-   Exporting firewall policies from FortiGate
+-   Client-side filtering of policies
+-   CSV export
+-   DNS / address object resolution
+-   Service → port resolution (including port range compression)
+-   Fully environment-driven configuration via `.env`
 
 ------------------------------------------------------------------------
 
-## Требования
+## Requirements
 
 -   Python 3.9+
--   Доступ к FortiGate REST API
--   API Token с правами на CMDB (firewall policy)
 -   FortiGate FortiOS 6.x / 7.x
+-   REST API access enabled
+-   API Token with CMDB read permissions (firewall policy, address,
+    service)
 
 ------------------------------------------------------------------------
 
-## Установка
+## Installation
 
-### 1. Клонировать репозиторий
+### 1. Clone repository
 
 ``` bash
 git clone <repo_url>
-cd FG-api
+cd ffpe
 ```
 
-### 2. Создать виртуальное окружение
+### 2. Create virtual environment
 
 ``` bash
 python -m venv .venv
-source .venv/bin/activate   # Linux/macOS
-.venv\Scripts\activate    # Windows
+source .venv/bin/activate        # Linux/macOS
+.venv\Scripts\activate         # Windows
 ```
 
-### 3. Установить зависимости
+### 3. Install dependencies
 
 ``` bash
 pip install -r requirements.txt
@@ -43,15 +51,15 @@ pip install -r requirements.txt
 
 ------------------------------------------------------------------------
 
-## Первичная настройка
+## Configuration
 
-### 1. Создать `.env`
+Create your runtime config:
 
 ``` bash
 cp .env.example .env
 ```
 
-### 2. Заполнить обязательные параметры
+Edit `.env` and set required values:
 
 ``` dotenv
 FGT_API_TOKEN=
@@ -59,18 +67,43 @@ FGT_API_BASE_URL=https://<fortigate>/api/v2
 FGT_VDOM=
 ```
 
-### 3. (Опционально) Отключить проверку TLS
+Optional:
 
 ``` dotenv
 FGT_VERIFY_TLS=false
+FGT_TIMEOUT_SECONDS=20
 ```
 
 ------------------------------------------------------------------------
 
-## Управление фильтрацией
+## Main Export
 
-Фильтры применяются **клиентской логикой** (после получения данных).\
-Если значение пустое --- фильтр не применяется.
+Run:
+
+``` bash
+python main.py
+```
+
+Output:
+
+-   CSV written to `OUTPUT_DIR`
+-   Filename controlled by `CSV_FILENAME`
+
+Example:
+
+``` dotenv
+EXPORT_CSV=true
+CSV_FILENAME=firewall_policies.csv
+OUTPUT_DIR=./output
+```
+
+------------------------------------------------------------------------
+
+## Filtering
+
+All filters are client-side unless using `FGT_SERVER_FILTER`.
+
+### Exact filters
 
 ``` dotenv
 FILTER_SRCINTF=
@@ -84,7 +117,21 @@ FILTER_DSTADDR=
 FILTER_SERVICE=
 ```
 
-### Серверная фильтрация (FortiOS)
+### IN filters (comma-separated)
+
+``` dotenv
+FILTER_SRCINTF_IN=
+FILTER_DSTINTF_IN=
+```
+
+### NOT IN filters
+
+``` dotenv
+FILTER_DSTINTF_NOT_IN=DMZ,Guest
+FILTER_STATUS_NOT_IN=disable
+```
+
+### Server-side (FortiOS query)
 
 ``` dotenv
 FGT_SERVER_FILTER=srcintf==port1
@@ -92,55 +139,86 @@ FGT_SERVER_FILTER=srcintf==port1
 
 ------------------------------------------------------------------------
 
-## Управление выводом
+## Name / DNS Resolution
 
-### CSV (основной результат)
+Script: `scripts/resolve_name.py`
 
-``` dotenv
-EXPORT_CSV=true
-CSV_FILENAME=firewall_policies.csv
-OUTPUT_DIR=./output
-```
+Resolves:
 
-### Консоль (опционально)
+-   IP → hostname (PTR)
+-   hostname → IP (A)
+-   fallback via exported address objects
 
-``` dotenv
-PRINT_CONSOLE=false
-OUTPUT_MAX_COL_WIDTH=80
-```
-
-### Управление полями (SHOW\_\*)
+### Enable
 
 ``` dotenv
-SHOW_POLICYID=true
-SHOW_NAME=true
-SHOW_SRCINTF=true
-SHOW_DSTINTF=true
-SHOW_SRCADDR=true
-SHOW_DSTADDR=true
-SHOW_SERVICE=true
-SHOW_ACTION=true
-SHOW_STATUS=true
-SHOW_SCHEDULE=false
-SHOW_LOGTRAFFIC=false
+RESOLVE_ENABLED=true
+RESOLVE_COLUMNS=srcaddr,dstaddr
+RESOLVE_DISPLAY_MODE=full   # full | ip
 ```
 
-CSV автоматически адаптируется под выбранные поля.
-
-------------------------------------------------------------------------
-
-## Запуск
+Run:
 
 ``` bash
-python main.py
+python scripts/resolve_name.py
 ```
 
-Результат: - CSV файл в директории `output/` - Имя файла задаётся через
-`CSV_FILENAME` или генерируется автоматически
+Interactive mode (optional):
+
+``` dotenv
+RESOLVE_INTERACTIVE=true
+```
 
 ------------------------------------------------------------------------
 
-## Отладка
+## Service / Port Resolution
+
+Script: `scripts/resolve_ports.py`
+
+Resolves service names into:
+
+    service_name(port/proto)
+
+Supports:
+
+-   Custom services
+-   Service groups
+-   Automatic port range compression
+
+Example:
+
+    4001/tcp 4002/tcp 4003/tcp
+    → 4001-4003/tcp
+
+### Enable
+
+``` dotenv
+PORTS_RESOLVE_ENABLED=true
+PORTS_RESOLVE_COLUMNS=service
+```
+
+Required truth tables:
+
+``` dotenv
+PORTS_SERVICES_CSV=./inventory/firewall_services_custom.csv
+PORTS_SERVICE_GROUPS_CSV=./inventory/firewall_service_groups_with_ports.csv
+```
+
+Run:
+
+``` bash
+python scripts/resolve_ports.py
+```
+
+Interactive selection:
+
+``` dotenv
+PORTS_RESOLVE_INTERACTIVE=true
+```
+
+------------------------------------------------------------------------
+
+## Debug
 
 ``` dotenv
 DEBUG=true
@@ -148,14 +226,18 @@ DEBUG_RESPONSE_KEYS=true
 DEBUG_RESULTS_TYPE=true
 ```
 
-В debug-режиме выводится: - Итоговый URL запроса - HTTP статус -
-Структура ответа FortiGate - Тип и размер `results`
+Displays:
+
+-   Final request URL
+-   HTTP status
+-   Response structure
+-   Result size
 
 ------------------------------------------------------------------------
 
-## Структура проекта (ключевые элементы)
+## Project Structure
 
-    FG-api/
+    ffpe/
     ├── main.py
     ├── fgpol/
     │   ├── config.py
@@ -165,13 +247,43 @@ DEBUG_RESULTS_TYPE=true
     │   ├── fortios.py
     │   ├── exporters.py
     │   └── table.py
+    ├── scripts/
+    │   ├── resolve_name.py
+    │   ├── resolve_ports.py
+    │   └── export_*.py
+    ├── inventory/
     ├── output/
-    │   └── .gitkeep
     ├── .env.example
     └── requirements.txt
 
 ------------------------------------------------------------------------
 
-## Версия
+## Typical Workflow
 
--   v1.0
+1.  Export policies:
+
+``` bash
+python main.py
+```
+
+2.  Resolve names:
+
+``` bash
+python scripts/resolve_name.py
+```
+
+3.  Resolve ports:
+
+``` bash
+python scripts/resolve_ports.py
+```
+
+Final result:
+
+    firewall_policies_ports.csv
+
+------------------------------------------------------------------------
+
+## Version
+
+Current: 1.5.2

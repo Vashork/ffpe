@@ -5,9 +5,16 @@ Post-process CSV: resolve selected columns into name[ip] inplace.
 Reads settings from .env (project root).
 Input CSV:
   - RESOLVE_INPUT_CSV if set
-  - otherwise the newest *.csv from OUTPUT_DIR
+  - otherwise:
+      - if RESOLVE_INTERACTIVE=true -> ask user to select CSV from OUTPUT_DIR
+      - else -> newest *.csv from OUTPUT_DIR
 
 Writes output CSV to OUTPUT_DIR with suffix RESOLVE_OUTPUT_SUFFIX.
+
+Extra:
+  RESOLVE_DISPLAY_MODE=full|ip
+    full: keep name[ip]
+    ip: write only ip from brackets (fallback to original token if unknown)
 """
 
 from __future__ import annotations
@@ -20,23 +27,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import csv
+import os
+import re
 import threading
 import time
+from datetime import datetime
 from typing import Dict, List
+
+from dotenv import load_dotenv
 
 from fgpol.config import load_config
 from fgpol.resolver import DnsResolver, FwObjectsLookup, resolve_cell
 
-
-import os
-import shutil
-import sys
-import threading
-import time
+# Make sure .env vars are available via os.getenv (load_config does not export them)
+load_dotenv(".env")
 
 
 class Spinner:
-    """Clean one-line spinner; handles long lines (no wrapping) and clears properly."""
+    """Clean one-line spinner; avoids line wrapping by truncation."""
 
     def __init__(self, message: str = "Resolving") -> None:
         self.message = message
@@ -44,13 +52,8 @@ class Spinner:
         self._lock = threading.Lock()
         self._current = ""
         self._thread: threading.Thread | None = None
-        self._last_lines = 1
-
-        # Enable ANSI on Windows terminals that support it
-        self._ansi = sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
 
     def set_current(self, text: str) -> None:
-        # make it single-line
         text = text.replace("\r", " ").replace("\n", " ")
         with self._lock:
             self._current = text
@@ -66,51 +69,27 @@ class Spinner:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=1.0)
-        self._clear_rendered_lines()
+        self._clear_line()
 
-    def _term_width(self) -> int:
+    @staticmethod
+    def _term_width() -> int:
         try:
+            import shutil
+
             return shutil.get_terminal_size(fallback=(120, 24)).columns
         except Exception:
             return 120
 
-    def _clear_rendered_lines(self) -> None:
+    def _clear_line(self) -> None:
         width = self._term_width()
-
-        if self._ansi:
-            # Clear all previously occupied lines and return to the top line
-            for _ in range(self._last_lines):
-                sys.stdout.write("\r\x1b[2K")  # clear current line
-                sys.stdout.write("\x1b[1A")    # cursor up
-            sys.stdout.write("\r\x1b[2K")      # clear the line we're on
-            sys.stdout.write("\r")
-            sys.stdout.flush()
-        else:
-            # best-effort: clear only current line
-            sys.stdout.write("\r" + (" " * width) + "\r")
-            sys.stdout.flush()
-
-        self._last_lines = 1
+        print("\r" + (" " * width) + "\r", end="", flush=True)
 
     def _render(self, line: str) -> None:
         width = self._term_width()
-
-        # Truncate to avoid wrapping (reserve 1 char)
         if width > 2 and len(line) >= width:
             line = line[: max(0, width - 2)] + "…"
-
-        # Compute how many terminal lines it would occupy *without truncation*:
-        # (we keep truncation anyway; this is for clearing safety)
-        self._last_lines = 1
-
-        if self._ansi:
-            sys.stdout.write("\r\x1b[2K")  # clear line
-            sys.stdout.write("\r" + line)
-            sys.stdout.flush()
-        else:
-            sys.stdout.write("\r" + (" " * width) + "\r")
-            sys.stdout.write(line)
-            sys.stdout.flush()
+        print("\r" + (" " * width), end="", flush=True)
+        print("\r" + line, end="", flush=True)
 
     def _run(self) -> None:
         frames = ["\\", "|", "/", "-"]
@@ -118,27 +97,58 @@ class Spinner:
         while not self._stop.is_set():
             with self._lock:
                 cur = self._current
-
             tail = f" — {cur}" if cur else ""
-            line = f"{self.message} [{frames[i % len(frames)]}]{tail}"
-            self._render(line)
-
+            self._render(f"{self.message} [{frames[i % len(frames)]}]{tail}")
             i += 1
             time.sleep(0.12)
 
 
+def _list_csv_candidates(output_dir: str) -> List[Path]:
+    out = Path(output_dir)
+    if not out.exists():
+        return []
+    candidates = sorted(out.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [p for p in candidates if p.is_file()]
 
-def _pick_input_csv(output_dir: str, explicit: str | None) -> Path:
+
+def _select_csv_interactive(output_dir: str) -> Path:
+    candidates = _list_csv_candidates(output_dir)
+    if not candidates:
+        raise FileNotFoundError(f"No CSV files found in output dir: {output_dir}")
+
+    print(f"\nAvailable CSV files in {output_dir}:\n")
+    for i, p in enumerate(candidates, start=1):
+        ts = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{i}] {p.name}    {ts}")
+
+    try:
+        while True:
+            s = input(f"\nSelect file to resolve names (1-{len(candidates)}): ").strip()
+            if not s:
+                continue
+            if s.isdigit():
+                idx = int(s)
+                if 1 <= idx <= len(candidates):
+                    return candidates[idx - 1]
+            print("Invalid selection. Please enter a number from the list.")
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled.")
+        raise SystemExit(0)
+
+
+def _pick_input_csv(output_dir: str, explicit: str | None, interactive: bool) -> Path:
     if explicit:
         p = Path(explicit)
         if not p.exists():
             raise FileNotFoundError(f"Input CSV not found: {p}")
         return p
 
-    out = Path(output_dir)
-    candidates = sorted(out.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if interactive:
+        return _select_csv_interactive(output_dir)
+
+    candidates = _list_csv_candidates(output_dir)
     if not candidates:
-        raise FileNotFoundError(f"No CSV files found in output dir: {out}")
+        raise FileNotFoundError(f"No CSV files found in output dir: {output_dir}")
     return candidates[0]
 
 
@@ -149,6 +159,38 @@ def _parse_columns(value: str) -> List[str]:
     return cols
 
 
+_BRACKET_RE = re.compile(r"\[(.*?)\]")
+
+
+def _to_ip_only(resolved_token: str, original_token: str) -> str:
+    m = _BRACKET_RE.search(resolved_token)
+    if not m:
+        return original_token
+    inner = (m.group(1) or "").strip()
+    if not inner or inner == "?":
+        return original_token
+    return inner
+
+
+def _apply_display_mode(original_cell: str, resolved_cell: str, mode: str) -> str:
+    mode = (mode or "full").lower()
+    if mode != "ip":
+        return resolved_cell
+
+    orig_tokens = [t.strip() for t in original_cell.split(",") if t.strip()]
+    res_tokens = [t.strip() for t in resolved_cell.split(",") if t.strip()]
+
+    out: List[str] = []
+    for i, rt in enumerate(res_tokens):
+        ot = orig_tokens[i] if i < len(orig_tokens) else rt
+        out.append(_to_ip_only(rt, ot))
+
+    if len(orig_tokens) > len(res_tokens):
+        out.extend(orig_tokens[len(res_tokens) :])
+
+    return ", ".join(out)
+
+
 def main() -> int:
     cfg = load_config(".env")
 
@@ -156,7 +198,10 @@ def main() -> int:
         print("Resolve disabled (RESOLVE_ENABLED=false).")
         return 0
 
-    input_csv = _pick_input_csv(cfg.output_dir, cfg.resolve_input_csv)
+    interactive = os.getenv("RESOLVE_INTERACTIVE", "false").lower() == "true"
+    display_mode = os.getenv("RESOLVE_DISPLAY_MODE", "full")
+
+    input_csv = _pick_input_csv(cfg.output_dir, cfg.resolve_input_csv, interactive)
     suffix = cfg.resolve_output_suffix or "_resolved"
     columns_to_resolve = _parse_columns(cfg.resolve_columns)
     timeout = cfg.resolve_dns_timeout
@@ -193,8 +238,11 @@ def main() -> int:
                 for col in columns_to_resolve:
                     val = (row.get(col) or "").strip()
                     if val:
-                        spinner.set_current(f"{col}={val}")
-                        row[col] = resolve_cell(val, resolver)
+                        short = val if len(val) <= 80 else (val[:80] + "…")
+                        spinner.set_current(f"{col}={short}")
+
+                        resolved = resolve_cell(val, resolver)
+                        row[col] = _apply_display_mode(val, resolved, display_mode)
                 rows.append(row)
     finally:
         spinner.stop()

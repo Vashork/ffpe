@@ -6,7 +6,9 @@ Reads settings from .env (project root).
 
 Input CSV:
   - PORTS_RESOLVE_INPUT_CSV if set
-  - otherwise the newest *.csv from OUTPUT_DIR
+  - otherwise:
+      - if PORTS_RESOLVE_INTERACTIVE=true -> ask user to select CSV from OUTPUT_DIR
+      - else -> newest *.csv from OUTPUT_DIR (excluding truth tables)
 
 Service tables:
   - PORTS_SERVICES_CSV -> firewall_services_custom.csv
@@ -17,6 +19,10 @@ Columns to resolve:
     Example: PORTS_RESOLVE_COLUMNS=service,services
 
 Writes output CSV to OUTPUT_DIR with suffix PORTS_RESOLVE_OUTPUT_SUFFIX (default: _ports).
+
+Also:
+  - supports large CSV fields (RPC)
+  - compresses sequential ports: 4001/tcp 4002/tcp 4003/tcp -> 4001-4003/tcp
 """
 
 from __future__ import annotations
@@ -24,34 +30,23 @@ from __future__ import annotations
 import csv
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 from dotenv import load_dotenv
 
-# Load env first
 load_dotenv(".env")
 
-csv.field_size_limit(sys.maxsize)
+# allow very large CSV fields (RPC ranges etc.)
+try:
+    csv.field_size_limit(sys.maxsize)
+except OverflowError:
+    csv.field_size_limit(10_000_000)
 
-# Ensure project root is importable (optional; kept for consistency with other scripts)
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-
-def _pick_input_csv(output_dir: str, explicit: str | None) -> Path:
-    if explicit:
-        p = Path(explicit)
-        if not p.exists():
-            raise FileNotFoundError(f"Input CSV not found: {p}")
-        return p
-
-    out = Path(output_dir)
-    candidates = sorted(out.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not candidates:
-        raise FileNotFoundError(f"No CSV files found in output dir: {out}")
-    return candidates[0]
 
 
 def _parse_columns(value: str | None) -> List[str]:
@@ -64,12 +59,63 @@ def _parse_columns(value: str | None) -> List[str]:
 
 
 def _split_tokens(cell: str) -> List[str]:
-    # same convention as resolve_csv.py: comma-separated tokens
+    # comma-separated tokens (same as resolve_name.py)
     return [t.strip() for t in cell.split(",") if t.strip()]
 
 
+def compress_ports(port_tokens: List[str]) -> List[str]:
+    """
+    Compress sequential numeric ports per proto:
+      ["4001/tcp","4002/tcp","4003/tcp","53/udp","4010/tcp"]
+    -> ["4001-4003/tcp","4010/tcp","53/udp"]
+    """
+    by_proto: Dict[str, List[int]] = {}
+    passthrough: List[str] = []
+
+    for tok in port_tokens:
+        tok = tok.strip()
+        if not tok:
+            continue
+        if "/" not in tok:
+            passthrough.append(tok)
+            continue
+
+        port_part, proto = tok.rsplit("/", 1)
+        if port_part.isdigit():
+            by_proto.setdefault(proto, []).append(int(port_part))
+        else:
+            passthrough.append(tok)
+
+    out: List[str] = []
+
+    for proto, ports in by_proto.items():
+        ports = sorted(set(ports))
+        i = 0
+        while i < len(ports):
+            start = ports[i]
+            end = start
+            while i + 1 < len(ports) and ports[i + 1] == end + 1:
+                i += 1
+                end = ports[i]
+            if start == end:
+                out.append(f"{start}/{proto}")
+            else:
+                out.append(f"{start}-{end}/{proto}")
+            i += 1
+
+    out.extend(passthrough)
+
+    def _sort_key(t: str):
+        if "/" in t:
+            pp, pr = t.rsplit("/", 1)
+            first = pp.split("-", 1)[0]
+            return (pr, int(first) if first.isdigit() else 10**12, t)
+        return ("~", 10**12, t)
+
+    return sorted(out, key=_sort_key)
+
+
 def _join_ports(parts: List[str]) -> str:
-    # join non-empty columns with spaces; unique preserving order
     tokens: List[str] = []
     for p in parts:
         if not p:
@@ -79,13 +125,14 @@ def _join_ports(parts: List[str]) -> str:
                 tokens.append(t)
 
     seen: Set[str] = set()
-    out: List[str] = []
+    uniq: List[str] = []
     for t in tokens:
         if t not in seen:
             seen.add(t)
-            out.append(t)
+            uniq.append(t)
 
-    return " ".join(out)
+    compressed = compress_ports(uniq)
+    return " ".join(compressed)
 
 
 def load_services_table(path: Path) -> Dict[str, str]:
@@ -168,12 +215,70 @@ def resolve_service_token(token: str, svc_map: Dict[str, str], grp_map: Dict[str
     return token
 
 
+def _list_csv_candidates(output_dir: str) -> List[Path]:
+    out = Path(output_dir)
+    if not out.exists():
+        return []
+
+    # exclude truth tables so we don't accidentally "resolve" them
+    exclude = {
+        "firewall_services_custom.csv",
+        "firewall_service_groups_with_ports.csv",
+    }
+
+    candidates = sorted(out.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [p for p in candidates if p.is_file() and p.name not in exclude]
+
+
+def _select_csv_interactive(output_dir: str) -> Path:
+    candidates = _list_csv_candidates(output_dir)
+    if not candidates:
+        raise FileNotFoundError(f"No CSV files found in output dir: {output_dir}")
+
+    print(f"\nAvailable CSV files in {output_dir}:\n")
+    for i, p in enumerate(candidates, start=1):
+        ts = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{i}] {p.name}    {ts}")
+
+    try:
+        while True:
+            s = input(f"\nSelect file to resolve ports (1-{len(candidates)}): ").strip()
+            if not s:
+                continue
+            if s.isdigit():
+                idx = int(s)
+                if 1 <= idx <= len(candidates):
+                    return candidates[idx - 1]
+            print("Invalid selection. Please enter a number from the list.")
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled.")
+        raise SystemExit(0)
+
+
+def _pick_input_csv(output_dir: str, explicit: str | None, interactive: bool) -> Path:
+    if explicit:
+        p = Path(explicit)
+        if not p.exists():
+            raise FileNotFoundError(f"Input CSV not found: {p}")
+        return p
+
+    if interactive:
+        return _select_csv_interactive(output_dir)
+
+    candidates = _list_csv_candidates(output_dir)
+    if not candidates:
+        raise FileNotFoundError(f"No CSV files found in output dir: {output_dir}")
+    return candidates[0]
+
+
 def main() -> int:
     if os.getenv("PORTS_RESOLVE_ENABLED", "false").lower() != "true":
         print("Ports resolve disabled (PORTS_RESOLVE_ENABLED=false).")
         return 0
 
     output_dir = os.getenv("OUTPUT_DIR", "./output")
+    interactive = os.getenv("PORTS_RESOLVE_INTERACTIVE", "false").lower() == "true"
+
     input_csv_env = os.getenv("PORTS_RESOLVE_INPUT_CSV")
     suffix = os.getenv("PORTS_RESOLVE_OUTPUT_SUFFIX") or "_ports"
     columns_to_resolve = _parse_columns(os.getenv("PORTS_RESOLVE_COLUMNS"))
@@ -190,7 +295,7 @@ def main() -> int:
     svc_map = load_services_table(services_csv)
     grp_map: Dict[str, str] = load_groups_table(groups_csv) if groups_csv else {}
 
-    input_csv = _pick_input_csv(output_dir, input_csv_env)
+    input_csv = _pick_input_csv(output_dir, input_csv_env, interactive)
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
